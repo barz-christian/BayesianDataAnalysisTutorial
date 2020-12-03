@@ -1,0 +1,994 @@
+---
+title: "Tutorial on bayesian analysis"
+author: "Christian Barz"
+date: "24-08-2020, last update: `r lubridate::today()`"
+output:
+  html_document:
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = FALSE, 
+                      message=FALSE,
+                      warning = FALSE,
+                      fig.path='Figs/', 
+                      eval = TRUE)
+```
+
+# introduction {.tabset}
+
+## summary 
+
+This note is meant as an introduction to Bayesian analysis using Stan.
+
+It consist of 3 parts:
+
+1. The introduction you are reading at the moment followed by initial set up steps and remarks on reproducibility. (which you can skip) 
+2. An introduction to approximate Bayesian computing, which will explain the basic idea of bayesian modeling
+3. Case studies using Stan and bayesian analyis to answer typical questions
+
+**For the ones who can not wait, I recommend directly to jump to section 3.**
+
+We remark that most ideas come from [Rasmus Bååth](http://www.sumsar.net/).
+
+## initial setup
+
+We assume that `R` and `rStan` are installed. Otherwise please have a look [here](https://mc-stan.org/users/interfaces/rstan).
+
+We will use the following libraries in this report:
+
+```{r}
+library(pacman)
+p_load(
+  tidyverse,
+  ggplot2,
+  rstan
+)
+```
+
+We will not use `ggplot2` much, because we focus on creating stan models instead of creating "beautiful" plots!
+
+In a later incarnation we might replace the default plots by nice `ggplots`.
+
+For reproducibility please look in the corresponing section.
+
+## reproducibility
+
+```{r}
+sessionInfo()
+```
+
+
+# approximative bayesian computation and MCMC {.tabset}
+
+## introduction
+
+In principle whenever we do bayesian analysis or modeling we need 3 things:
+
+1. data
+2. a generative model and
+3. a prior distribution
+
+In this section we will explain how these ingredients are used to determine a posteriori distribution.
+
+For the ones who like real world examples we pick up the example from Rasmus, in which a company has run two marketing campains and want to know which one is "better". Here "better" can mean more new customers or as
+campains do cost, which campain results in an higher revenue.
+
+To be more concrete, we assume that the campains had the following impact:
+
+- campain A : 6 of 16 person became costumers
+- campain B : 10 of 16 person became customers
+
+Hence some question could be:
+
+- Question 1: What is the rate of new costumers if we apply the campain A on a larger number of people?
+- Question 2: What is the problability that campain A is better than campain B?
+- Question 3: If we apply campain on 100 people, how many new costumers we might have.
+- Question 4: Assume the campain have different cost, which campain leads to a higher revenue?
+
+
+## approximate Bayesian calculation (theory)
+
+Assume we have the three ingredients for a bayesian data analysis, that is data, a generative model and a prior distribution. Hence the question is:
+
+1. how do we fit the model?
+2. how do I use it to answer my question?
+
+To do so we use a method called a approximate Bayesian computation, which will fit the bayesian model.
+The methods 
+
+1. we simulate data, i.e. we draw samples from the prior distribution and put them into the model to generate data
+2. we filter the tuples `(parameter, generated data)` to `generated data = observed data`
+3. the remaining set of parameters represents a sample of the posterior distribution and can be used to answer question.
+
+So let us gather the ingredients and get our hands dirty.
+
+We recall that we have data, i.e. six of 16 person (respk. 10 of 16 person) became a customer after campain A (respk. campain B).
+
+A first guess would be that $\frac{6}{16}*n$ of $n$ persons become a costumer, but that is just a point estimate.
+
+Our generative model should predict, how many `k` of `n` persons became a customer. This is precisely what the binomial distribution does. It is defined as follows:
+
+$$
+B(k|p,n) = \binom{n}{k}p^k(1-p)^{n-k}
+$$
+
+where 
+
+- `n` is the number of trials
+- `k` is the number of successful events
+- `p` is the probability of success (its value comes from the prior distribution)
+
+For simplicity we assume that the prior distribution is uniform, which can be interpreted that it is equally likely that a person becomes a customer.
+
+Of course that is somehow naive and I believe obvious if we look at the two extreme cases:
+- no one is interested in our product, i.e. $p=0$ and
+- everyone is interested in our product, i.e. $p=1$.
+
+In a next step we should think of something more advance as define the prior distribution as (linear) combination of other distributions or use a uniform distribution which has strict boarders like
+$$
+p\sim uniform(0.1, 0.9)
+$$
+
+
+### Remarks on Approximate Bayesian computations
+
+The method is conceptional simple, that is why we spend time explaining it.
+But is computational intensive, that is why we will learn more advance techniques later.
+
+However lets get our hands dirty in the next tab.
+
+## An example
+
+Let us recall the setting: we have run two campains. The observation from campain A were 6 of 16 person became customer.
+
+
+```{r}
+# defining some parameters
+number_of_samples <- 10000
+
+trials <- 16
+observation <- 6
+
+# draw samples from the prior distribution
+prior <- runif(n = number_of_samples, min = 0, max = 1)
+
+# define generative model
+generative_model <- function(trials, p){
+  return(rbinom(n = 1, size = trials, prob = p))
+}
+
+# simmulate data
+simmulated_data = tibble(prior) %>%
+  mutate(costumers = sapply(prior, function(x) generative_model(trials = trials, p = x))) %>%
+  # restrict data to observation
+  filter(costumers == observation) %>%
+  # round the prior for a later analysis
+  mutate(posterior = round(prior, digits = 2))
+```
+
+Let us have a look at the posterior distribution and some statistical measures:
+
+```{r}
+hist(simmulated_data$posterior)
+
+summary(simmulated_data$posterior)
+```
+
+We see that the "naive" guess $\frac{6}{16}$ was not a bad choice, indeed it will be the maximum likelihood which one will allways recieve using a uniform prior.
+
+however most intestingly would be a credibility intervall, i.e. we are 95% certain that after campain A 
+```{r}
+quantile(simmulated_data$posterior, c(0.025, 0.975))
+```
+
+percent of the people will be new costumers.
+
+However one big benefit arises when we like to answer the other questions:
+
+### Question : What’s the probability that campain A is better than campain B?
+
+We assume that camapin B has a success rate of 20%.
+
+The question can be reformulated as follows: In how many cases do we have a better success rate than 20%.
+
+```{r}
+success_campain_B <- 0.2
+
+simmulated_data %>% 
+  filter(posterior > success_campain_B) %>%
+  nrow(.) / nrow(simmulated_data)
+```
+### Question : If campain A was used on 100 people how many new costumers we will have?
+
+Therefore we use the posterior distribution 
+
+```{r}
+more_people <- simmulated_data %>%
+  pull(posterior) %>%
+  sapply(., function(x) generative_model(trials = 100, p = x))
+
+hist(more_people)
+summary(more_people)
+```
+
+
+## Same example using Stan
+
+In a previous tab we used approximate Bayesian Computation to do some data analysis to answer some Question from A/B testing. 
+Now we the same using more advanced techniques, precisely using Monte Carlo Marcov Chain algorithms (MCMC) from Stan.
+
+Let us recall the observations:
+
+- In campain A: 6 of 16 people became customers
+- In campain B: 10 of 16 people became customers
+
+```{r echo=TRUE, results='hide'}
+# define Stan model
+model <- "
+# We define what data we will use in our model
+data {
+  # Number of trials
+  int nA;
+  int nB;
+  # Number of successes
+  int sA;
+  int sB;
+}
+
+# We define the 'unknowns' aka parameters
+parameters {
+  real<lower=0, upper=1> rateA;
+  real<lower=0, upper=1> rateB;
+}
+
+# We define the generative model
+model {
+  rateA ~ uniform(0, 1);
+  rateB ~ uniform(0, 1);
+  sA ~ binomial(nA, rateA);
+  sB ~ binomial(nB, rateB);
+}
+
+# In the generated quantiles block you can calculate 'derivatives' of
+# the parameters. As we are interested if campain B is better than A, we consider their difference
+generated quantities {
+  real rate_diff;
+  rate_diff = rateB - rateA;
+}
+"
+
+data <- list(nA = 16, nB = 16, sA = 6, sB = 10)
+
+# compiling and producing posterior samples from the model
+samples <- stan(model_code = model, data = data)
+```
+
+```{r}
+# plotting and summarising the posterior distribution
+samples
+traceplot(samples)
+```
+
+The traceplot can be used as a measure to see the convergence of the marcov chains. Simply said the expected plot should look like random noise, when everything is fine. Moreover we can also look at the `Rhat` value in the summary statistic. However we will not spend more time on this question, as we want to get familiar with Stan.
+
+
+### Question 1: Which campiain leads to a higher rate of costumers?
+
+We recall that one of our parameters `rateA` and `rateB` were the probability of becoming a new costumer and that $rate_{diff}$ was defined as
+
+$$
+rate_{diff}:= rateB -rateA
+$$
+
+hence $rate_{diff}$ is positive if and only if campain B lead to more new costumers.
+
+```{r}
+# we convert the output to a data frame
+posterior <- as.data.frame(samples)
+
+sum(posterior$rate_diff > 0) / length(posterior$rate_diff)
+```
+
+Hence with ~90% probability the campain B lead to more costumers as campain A.
+(We remark that the number above depend on the sampling.)
+
+### Question 2 Test an Hypothesis? (including background knowlegde)
+
+We now want to use a more informative prior and assume we got told: The rate of new costumers can not
+
+- be lower than 5% and
+- be higher than 15%.
+
+One practical way is to create a prior distribution using a (linear) combination of implemented ones,
+or use the beta distibution and play around with its parameters until we find something which fits the hypothesis:
+
+```{r}
+hist(rbeta(9999, shape1 = 4, shape2 = 40), xlim=c(0, 1), 30)
+lines(c(0.05, 0.15), c(0,0), col="red", lwd = 3)
+```
+
+As we saw above the beta distribution with the parameters $(4,40)$ look promising.
+
+The `rStan` code would be the following
+
+
+```{r echo=TRUE, results='hide'}
+model_string <- "
+data {
+  # Number of trials
+  int nA;
+  int nB;
+  # Number of successes
+  int sA;
+  int sB;
+}
+
+parameters {
+  real<lower=0, upper=1> rateA;
+  real<lower=0, upper=1> rateB;
+}
+
+model {  
+  rateA ~ beta(4, 40);
+  rateB ~ beta(4, 40);
+  sA ~ binomial(nA, rateA);
+  sB ~ binomial(nB, rateB); 
+}
+
+generated quantities {
+  real rate_diff;
+  rate_diff = rateB - rateA;
+}
+"
+
+data_list <- list(nA = 16, nB = 16, sA = 6, sB = 10)
+
+# Compiling and producing posterior samples from the model.
+stan_samples <- stan(model_code = model_string, data = data_list)
+```
+```{r}
+# Plotting and summarizing the posterior distribution
+plot(stan_samples)
+```
+
+
+
+To answer the question we do the same as before:
+```{r}
+posterior <- as.data.frame(stan_samples)
+sum(posterior$rate_diff > 0) / length(posterior$rate_diff)
+```
+
+Hence campain B can still be considered to be more effective than campain A with around 80% probability.
+
+### Question 3 Which campain lead to an higher revenue?
+
+Now the example becomes more interesting from a real world point of view.
+
+We assume we have the following information
+
+- A new costumer is 1000,- worth.
+- Campain A cost 30,- per person.
+- Campain B cost 300,- per person.
+
+The good thing is, that we don’t have to make any changes to the model and only need to “post-process” the posterior distribution in posterior.
+
+```{r}
+posterior <- as.data.frame(stan_samples)
+# calculating the estimated posterior profit using method A (or B)
+# a cost of 30 kr + the average profit per sent out add
+profitA <- -30 + posterior$rateA * 1000 
+profitB <- -300 + posterior$rateB * 1000 
+hist(profitA)
+```
+
+```{r}
+hist(profitB)
+```
+
+Just by looking at the distribution it is clear that although campain B generates more costumers, we likely do not generate more money with it.
+
+However lets do the calculations:
+
+```{r}
+hist(profitA - profitB)
+expected_profit_diff <- mean(profitA - profitB)
+abline(v = expected_profit_diff, col = "red", lwd =2)
+```
+
+We conclude that the expected profit with campain A is ~200,- higher than with campain B.
+
+Of course in the real world we would test more priors and consider a bigger data set!
+
+
+# Bayesian case studies using Stan {.tabset}
+
+## summary
+
+The goal of the following tabs is to get familiar with Stan and learn basic techniques to tackle typical real life problems.
+
+For the ones who like a concrete example, think of being a farmer. You like to check weather a certain action is benefitial or not (from a data point of view).
+
+The examples are made in a way that the complexity rises from one to the other.
+
+## A/B testing (binomial target)
+
+### Cows and deseases
+
+You want to compare two drugs. Therefore you can 10 cows drug A and 10 cows drug B. Afterwards you measured how many of them got sick.
+
+Hence the resulting data could look like:
+```{r}
+cowA <- c(0, 1, 0, 0, 0, 0, 1, 0, 0, 0)
+cowB <- c(0, 0, 1, 1, 1, 0, 1, 1, 1, 0)
+```
+
+The idea is to use a Bernoulli distribution as a generative model, as the Bernoulli distribution is a special case of the binomial distribution with just one trial. Hence it matches the way the data is encoded.
+
+Because we are now dealing with vectors, we like to mention 2 ways of writing things in Stan
+
+- `int X[n]` defines an array `X` of integers of length `n`
+- `vector[n] X` defines a vector `X` of length `n` which components are real numbers
+
+Hence arrays are more general, but note the different in the definition.
+
+```{r results='hide'}
+model = "
+data {
+ # number of observations
+ int nA;
+ int nB;
+ # observations
+ int obsA[nA];
+ int obsB[nB];
+ }
+ 
+parameters {
+ real<lower=0, upper=1> theta1;
+ real<lower=0, upper=1> theta2;
+}
+
+model {
+theta1 ~ beta(1,1);
+theta2 ~ beta(1,1);
+obsA ~ bernoulli(theta1);
+obsB ~ bernoulli(theta2);
+}
+
+generated quantities {
+  real rate_diff;
+  rate_diff <- theta1 - theta2;
+}
+"
+# define data
+data <- list(obsA = cowA, obsB = cowB, nA = length(cowA), nB = length(cowB))
+
+# compile and produce posterior samples from the model
+samples <- stan(model_code = model, data = data)
+```
+
+```{r}
+# plot and summarise the posterior distribution
+samples
+plot(samples)
+```
+
+
+
+we convert the result to a data frame and look at the posterior distirbutions
+
+```{r}
+df <- as.data.frame(samples)
+hist(df$theta1)
+```
+```{r}
+hist(df$theta2)
+```
+
+### Question: What is the probability that drug A is less effective than drug B?
+
+```{r}
+print(paste("drug A is less effectiev than drug B with" ,as.character(mean(df$theta1 < df$theta2)), "percent"))
+
+hist(df$rate_diff)
+```
+
+
+
+
+## A/B testing (continous target)
+
+In the next example we have given a subset of 10 cows a special diet and recorded their milk production.
+In addition we had a control group of 15 cows which got the "usual" food. Let the date be as folllows
+
+```{r}
+diet_milk <- c(651, 679, 374, 601, 401, 609, 767, 709, 704, 679)
+normal_milk <- c(798, 1139, 529, 609, 553, 743, 151, 544, 488, 555, 257, 692, 678, 675, 538)
+```
+
+### Question : Does the diet result in a better milk production ?
+
+We assume that the milk production per cow and day is normaly distributed, i.e.
+
+$$
+milk \sim normal(\mu, \sigma)
+$$
+
+where $\mu$ is the mean and $\sigma$ is the standard deviation and `milk` is a vector of length `n`. Since Stan is partly vectorizes we will see this will not affact the Stan code much.
+
+We recall that the standard deviation is allways positive, hence we can put a lower bound on $\simga$ in the Stan code. In particular the same holds for $\mu$.
+Moreover we use for simplicity a uniform prior for $\simga$ and $\mu$, as in particular I am not a farmer at all and lack any prior information. We assume that 10 cows can not give more than 2000 liter a day.
+
+```{r results='hide'}
+# The Stan model as a string.
+model <- "
+data {
+  int n1;
+  int n2;
+  vector[n1] y1;
+  vector[n2] y2;
+}
+
+parameters {
+  real<lower=0> mu1;
+  real<lower=0> mu2;
+  real<lower=0> sigma1;
+  real<lower=0> sigma2;
+}
+
+model {  
+  mu1 ~ uniform(0, 2000);
+  mu2 ~ uniform(0, 2000);
+  sigma1 ~ uniform(0, 1000);
+  sigma2 ~ uniform(0, 1000);
+  y1 ~ normal(mu1, sigma1);
+  y2 ~ normal(mu2, sigma2); 
+}
+
+generated quantities {
+}
+"
+
+diet_milk <- c(651, 679, 374, 601, 401, 609, 767, 709, 704, 679)
+normal_milk <- c(798, 1139, 529, 609, 553, 743, 151, 544, 488, 555, 257, 692, 678, 675, 538)
+data <- list(y1 = diet_milk, y2 = normal_milk, 
+             n1 = length(diet_milk), n2 = length(normal_milk))
+
+# Compiling and producing posterior samples from the model.
+samples <- stan(model_code = model, data = data)
+```
+
+Let us have a look at the posterior distribution and a summary statistic
+
+```{r}
+stan_samples
+plot(stan_samples)
+```
+
+But I believe looking at a histogram is more informative
+```{r}
+df <- as.data.frame(samples) %>%
+  mutate(mu_diff = mu2 -mu1)
+
+df %>% ggplot(aes(x=mu_diff)) + geom_histogram()
+```
+
+This looks like a normal distribution with a slight shift into the negative direction.
+We recall that the difference is negative when when the diet had an effect. 
+However as the picture is just a basic histogram, we like to calculate the probabilities:
+
+```{r}
+print(paste("It is", as.character(mean(df$mu_diff >0)), "likely that a diet has no effect."))
+print(paste("It is", as.character(mean(df$mu_diff <0)), "likely that a diet has an effect."))
+```
+
+Hence it is likely that the diet has a positive effect but the experiment does not give a strong evidence.
+
+
+## A/B testing (outlier detection)
+
+Now be more realistic and include some outliers. They may occur because you play cards and drink with your friends every thursday. We assume you documented the following data:
+
+```{r}
+diet_milk <- c(651, 679, 374, 601, 4000, 401, 609, 767, 3890, 704, 679)
+normal_milk <- c(798, 1139, 529, 609, 553, 743, 3,151, 544, 488, 15, 257, 692, 678, 675, 538)
+```
+
+A possible trick in this situation is to supplement the normal distribution with wider tails, such that it is more sensitive to the central values and far away values are less likely.
+
+A good choice can be the t-distribution,  which is like the normal but has a third parameter. The parameter is called the “degrees of freedom” and lower “degrees of freedom” lead to wider tails and when the parameter is larger than about 50 the t-distribution is practically the same as the normal. Lets draw a basic picture of the t-distribution with a degree of freedom equal to 3.
+
+```{r}
+hist(rt(n= 1000, df = 3))
+```
+
+
+
+```{r results='hide'}
+# the Stan model
+model <- "
+data {
+  int n1;
+  int n2;
+  vector[n1] y1;
+  vector[n2] y2;
+}
+
+parameters {
+  real mu1;
+  real mu2;
+  real<lower=0> sigma1;
+  real<lower=0> sigma2;
+}
+
+model {  
+  mu1 ~ uniform(0, 2000);
+  mu2 ~ uniform(0, 2000);
+  sigma1 ~ uniform(0, 1000);
+  sigma2 ~ uniform(0, 1000);
+  y1 ~ student_t(3, mu1, sigma1);
+  y2 ~ student_t(3, mu2, sigma2);
+}
+
+generated quantities {
+}
+"
+
+# the data 
+diet_milk <- c(651, 679, 374, 601, 4000, 401, 609, 767, 3890, 704, 679)
+normal_milk <- c(798, 1139, 529, 609, 553, 743, 3,151, 544, 488, 15, 257, 692, 678, 675, 538)
+
+data <- list(y1 = diet_milk, y2 = normal_milk, 
+             n1 = length(diet_milk), n2 = length(normal_milk))
+
+# compile and draw posterior samples from the model.
+samples <- stan(model_code = model, data = data)
+```
+
+```{r}
+stan_samples
+plot(stan_samples)
+```
+
+
+### Question: How does a diet affect the milk production of cows (including outliers)?
+
+Again we convert the result to a data frame
+
+```{r}
+df <- as.data.frame(samples) %>%
+  mutate(mu_diff = mu2 -mu1)
+
+df %>% ggplot(aes(x=mu_diff)) + geom_histogram()
+```
+
+This looks like again a normal distribution with a slight shift more than before into the negative direction.
+We recall that the difference is negative when when the diet had an effect. 
+However as the picture is just a basic histogram, we like to calculate the probabilities:
+
+```{r}
+print(paste("It is", as.character(mean(df$mu_diff >0)), "likely that a diet has no effect."))
+print(paste("It is", as.character(mean(df$mu_diff <0)), "likely that a diet has an effect."))
+```
+
+No the evidence became stronger, but I would run a larger experiment, draw more samplpes and use an informative prior or use another model. For such an example see the next tab.
+
+
+## A/B testing (discrete target)
+
+We want to use the poison distribution next, which is a typical choice when dealing with "counted data". It has one parameter $\lambda$ which stands for the mean of the count. In Stan we would write it as follows:
+
+$$
+y \sim poisson(lambda)
+$$
+
+But lets have a real life example. What you did to the cows you did to the chicken too, i.e. you put some of them on diet and counted the number of produced egg per weeks.
+We are going to model the number of eggs with a poisson distribution.
+
+Let the data be:
+
+```{r}
+diet_eggs <- c(6, 4, 2, 3, 4, 3, 0, 4, 0, 6, 3)
+normal_eggs <- c(4, 2, 1, 1, 2, 1, 2, 1, 3, 2, 1)
+```
+
+### Question : Does the diet had a positive effect on the number of eggs per week?
+
+```{r results='hide'}
+# The Stan model
+model <- "
+data {
+  int n1;
+  int n2;
+  int y1[n1];
+  int y2[n2];
+}
+
+parameters {
+  real<lower=0> lambda1;
+  real<lower=0> lambda2;
+}
+
+model {  
+  lambda1 ~ uniform(0, 100);
+  lambda2 ~ uniform(0, 100);
+  y1 ~ poisson(lambda1);
+  y2 ~ poisson(lambda2); 
+}
+
+generated quantities {
+}
+"
+
+# the data
+diet_eggs <- c(6, 4, 2, 3, 4, 3, 0, 4, 0, 6, 3)
+normal_eggs <- c(4, 2, 1, 1, 2, 1, 2, 1, 3, 2, 1)
+data <- list(y1 = diet_eggs, y2 = normal_eggs, 
+             n1 = length(diet_eggs), n2 = length(normal_eggs))
+
+# compile and draw posterior samples from the model
+samples <- stan(model_code = model, data = data)
+```
+
+```{r}
+samples
+plot(samples)
+```
+
+
+
+Again we convert the result to a data frame:
+
+```{r}
+df <- as.data.frame(samples) %>%
+  mutate(lambda_diff = lambda1 - lambda2)
+
+df %>% ggplot(aes(x=lambda_diff)) + geom_histogram()
+```
+
+We see there a strong evidence that the diet is benefitial:
+
+```{r}
+print(paste("It is", as.character(mean(df$lambda_diff >0)), "likely that a diet has an effect."))
+```
+
+
+## different input format
+
+We now want to implement the same model as from diet example whit the cows, but we assume that the data is given in a more commeon way as a data frame, in which on column represents the group. 
+
+```{r}
+df <- data.frame(
+  milk = c(651, 679, 374, 601, 401, 609, 767, 709, 704, 679, 798, 1139,
+           529, 609, 553, 743, 151, 544, 488, 555, 257, 692, 678, 675, 538),
+  group = c(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2))
+```
+
+We can read the data into stan as follows 
+
+```{r}
+data <- list(y = df$milk, x = df$group, n = length(df$milk), 
+             n_groups = max(df$group))
+```
+
+If we put all together we get the following code chunk:
+
+```{r results='hide'}
+# The Stan model
+model <- "
+data {
+  int n;
+  int n_groups;
+  int x[n];
+  vector[n] y;
+}
+
+parameters {
+  vector[n_groups] mu;
+  vector<lower=0>[n_groups] sigma;
+}
+
+model {  
+  mu ~ uniform(0, 2000);
+  sigma ~ uniform(0, 1000);
+  y ~ normal(mu[x], sigma[x]);
+}
+
+generated quantities {
+}
+"
+
+df <- data.frame(
+  milk = c(651, 679, 374, 601, 401, 609, 767, 709, 704, 679, 798, 1139,
+           529, 609, 553, 743, 151, 544, 488, 555, 257, 692, 678, 675, 538),
+  group = c(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 
+            2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2))
+data <- list(y = df$milk, x = df$group, n = length(df$milk), 
+             n_groups = max(df$group))
+
+# Compiling and producing posterior samples from the model.
+samples <- stan(model_code = model, data = data)
+```
+```{r}
+samples
+plot(samples)
+```
+
+We will not inspect this closer, as in the following tab we will enlarge the scope.
+
+## different input format II
+
+Let's keep it brief, as we saw the example multiple times.
+Assume we have more than one diet and want to find out the best one. Let the data be given by :
+
+```{r}
+df <- data.frame(
+  milk = c(651, 679, 374, 601, 401, 609, 767, 709, 704, 679, 798, 1139, 529,
+           609, 553, 743, 151, 544, 488, 555, 257, 692, 678, 675, 538, 1061,
+           721, 595, 784, 877, 562, 800, 684, 741, 516),
+  group = c(1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+            2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3))
+```
+
+### Question : Which diet leads to the highest milk production compared to the others?
+
+```{r results='hide'}
+#The Stan model
+model <- "
+data {
+int n;
+int n_groups;
+int x[n];
+vector[n] y;
+}
+
+parameters {
+vector[n_groups] mu;
+vector<lower=0>[n_groups] sigma;
+}
+
+model {
+mu ~ uniform(0,2000);
+sigma ~ uniform(0,1000);
+y ~ normal(mu[x], sigma[x]);
+}
+"
+
+data <- list(y = df$milk, x = df$group, n = nrow(df), n_groups = max(df$group))
+
+samples <- stan(model_code = model, data = data)
+```
+
+```{r}
+samples
+plot(samples)
+```
+
+Let us compare the different diets:
+
+```{r}
+df <- as.data.frame(samples)
+hist(df$`mu[2]`-df$`mu[1]`)
+print(
+  paste(
+    "diet 2 is more effective than diet 1 with ",
+    as.character(mean(df$`mu[2]`-df$`mu[1]` >0)), "certainty",
+    sep = " ") )
+```
+
+
+
+```{r}
+hist(df$`mu[3]`-df$`mu[1]`)
+print(
+  paste(
+    "diet 3 is more effective than diet 1 with",
+    as.character(mean(df$`mu[3]`-df$`mu[1]` >0)), "certainty",
+    sep = " ") )
+```
+
+```{r}
+hist(df$`mu[3]`-df$`mu[2]`)
+print(
+  paste(
+    "diet 3 is more effective than diet 2 with",
+    as.character(mean(df$`mu[3]`-df$`mu[2]` >0)), "certainty",
+    sep = " ") )
+```
+
+We conclude that diet 3 has an impact on the milk production.
+
+## bayesian regression
+
+In the last scenario we want to do a bayesian linear regression, which means we have an explanatory variable $x$ and a target $y$.
+
+As a practical example we want to see if cows spending more time outside produce more milk and
+take as data the following one:
+
+```{r}
+df <- data.frame(milk = c(685, 691, 476, 1151, 879, 725, 1190, 1107, 809, 539,
+                          298, 805, 820, 498, 1026, 1217, 1177, 684, 1061, 834),
+                 hours = c(3, 7, 6, 10, 6, 5, 10, 11, 9, 3, 6, 6, 3, 5, 8, 11, 
+                           12, 9, 5, 5))
+```
+
+### Question does sunshine affect the milk production positively or negatively?
+
+We assume again that the milk production is normal distributed
+$$
+milk\sim normal(\mu, \sigma)
+$$
+
+but in addition we assume, that the parameter $\mu$ depends linearly on the sunshine, i.e.
+
+$$
+mu = \beta_0+\beta_1*x
+$$
+where $x$ is the number of sunshine hours.
+
+Let us write down the Stan model:
+```{r results='hide'}
+# The Stan model
+model <- "
+data {
+  int n;
+  vector[n] x;
+  vector[n] y;
+}
+
+parameters {
+  real beta0;
+  real beta1;
+  real<lower=0> sigma;
+}
+
+model {  
+  vector[n] mu;
+  beta0 ~ uniform(-1000, 1000);
+  beta1 ~ uniform(-1000, 1000);
+  sigma ~ uniform(0, 1000);
+  mu = beta0 + beta1 * x;
+  y ~ normal(mu, sigma);
+}
+
+generated quantities {
+}
+"
+
+# data 
+df <- data.frame(milk = c(685, 691, 476, 1151, 879, 725, 1190, 1107, 809, 539,
+                          298, 805, 820, 498, 1026, 1217, 1177, 684, 1061, 834),
+                 hours = c(3, 7, 6, 10, 6, 5, 10, 11, 9, 3, 6, 6, 3, 5, 8, 11, 
+                           12, 9, 5, 5))
+
+data <- list(n = nrow(df), x = df$hours, y = df$milk)
+
+# compile and draw posterior samples from the model
+samples <- stan(model_code = model, data = data)
+```
+
+```{r}
+samples
+plot(samples)
+```
+
+In bayesian analysis we do not get one regression line, which reduced the average distance to each data point in the given data. Instead we get multiple regression lines, which are 
+
+
+```{r}
+# plot the observations
+plot(df$hours, df$milk, xlim=c(0, 13), ylim = c(0, 1300))
+
+# Adding a sample of the posterior draws to the plot in order to visualize the
+# uncertainty of the regression line.
+s <- as.data.frame(samples)
+for(i in sample(nrow(s), size = 20)) {
+  abline(s[i,"beta0"], s[i,"beta1"], col = "gray")
+}
+```
+
+Of course this could be done better by using a sample from the most likely region of the posterior distribution, but a random sample allready shows that sun light has a positive effect on the milk production.
